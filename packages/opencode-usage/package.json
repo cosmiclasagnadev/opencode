@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "opencode-usage-dashboard",
+  "version": "1.0.0",
+  "description": "TUI usage dashboard plugin for OpenCode",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cosmiclasagnadev/opencode-usage.git"
+  },
+  "homepage": "https://github.com/cosmiclasagnadev/opencode-usage#readme",
+  "bugs": {
+    "url": "https://github.com/cosmiclasagnadev/opencode-usage/issues"
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit",
+    "build": "tsc --noEmit"
+  },
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./tui": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "tsconfig.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "oc-plugin": [
+    [
+      "tui",
+      {}
+    ]
+  ],
+  "engines": {
+    "opencode": ">=1.3.14"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.3.14",
+    "@opentui/core": ">=0.1.91",
+    "@opentui/solid": ">=0.1.91",
+    "solid-js": ">=1.9.10"
+  },
+  "peerDependenciesMeta": {
+    "@opencode-ai/plugin": {
+      "optional": true
+    },
+    "@opentui/core": {
+      "optional": true
+    },
+    "@opentui/solid": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "workspace:*",
+    "@opencode-ai/sdk": "workspace:*",
+    "@opentui/core": "0.1.91",
+    "@opentui/solid": "0.1.91",
+    "@tsconfig/bun": "catalog:",
+    "@tsconfig/node22": "catalog:",
+    "@types/node": "catalog:",
+    "@typescript/native-preview": "catalog:",
+    "solid-js": "catalog:",
+    "typescript": "catalog:"
+  }
+}
