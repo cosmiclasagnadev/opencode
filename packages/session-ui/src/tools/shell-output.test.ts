@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from "bun:test"
+import { randomUUID } from "node:crypto"
 import type { ShellOutputInput, ShellOutputOutput } from "@opencode/client/promise"
 import { createShellFollower, followShellOutput } from "./shell-output"
 import { SHELL_OUTPUT_TAIL_BYTES, SHELL_READ_TIMEOUT_MS } from "./shell-output-machine"
@@ -14,12 +15,13 @@ function server(text: () => string, page = Infinity) {
     load: (input: ShellOutputInput): Promise<ShellOutputOutput> => {
       const cursor = input.cursor ?? 0
       cursors.push(cursor)
-      const full = text()
-      const output = full.slice(cursor, cursor + page)
+      const full = Buffer.from(text())
+      const chunk = full.subarray(cursor, cursor + (input.limit ?? page))
+      const output = chunk.toString("utf8")
 
       return Promise.resolve({
         location,
-        data: { output, cursor: cursor + output.length, size: full.length, truncated: false },
+        data: { output, cursor: cursor + chunk.length, size: full.length, truncated: false },
       })
     },
   }
@@ -35,6 +37,27 @@ async function flush() {
 const notFound = (id: string) => ({ _tag: "ShellNotFoundError", id, message: "Shell command not found" })
 
 describe("followShellOutput", () => {
+  test.each([true, false])("seeks to the recent Unicode tail without polling, running=%s", async (running) => {
+    const text = "中".repeat(SHELL_OUTPUT_TAIL_BYTES * 2) + "🙂LATEST-MARKER\n"
+    const shell = server(() => text, SHELL_OUTPUT_TAIL_BYTES)
+    const outputs: string[] = []
+    const stop = followShellOutput({
+      id: randomUUID(),
+      directory: "/repo",
+      running,
+      load: shell.load,
+      onOutput: (output) => outputs.push(output),
+    })
+
+    try {
+      await flush()
+      expect(shell.cursors).toHaveLength(2)
+      expect(outputs.at(-1)).toBe(text.slice(-SHELL_OUTPUT_TAIL_BYTES))
+    } finally {
+      stop()
+    }
+  })
+
   test("stops polling a missing shell and never requests it again", async () => {
     vi.useFakeTimers()
 

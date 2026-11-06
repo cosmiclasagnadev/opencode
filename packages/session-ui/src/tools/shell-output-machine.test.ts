@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import {
   createShellFollowerState,
   SHELL_EXITED_MAX_RETRIES,
+  SHELL_OUTPUT_TAIL_BYTES,
   transitionShellFollower,
   type ShellFollowerEffect,
   type ShellFollowerEvent,
@@ -32,6 +33,37 @@ function fail(state: ShellFollowerState) {
 }
 
 describe("transitionShellFollower", () => {
+  test("keeps one catch-up snapshot across retries even when the output keeps growing", () => {
+    const text = "x".repeat(1_048_576 - 7) + "latest\n"
+    const first = transitionShellFollower(fresh(true), {
+      type: "read.succeeded",
+      attempt: 1,
+      page: { output: text.slice(0, 65_536), cursor: 65_536, size: text.length },
+    })
+
+    expect(waits(first.effects)).toEqual([])
+    const seek = first.effects.find((effect) => effect.type === "read")
+    expect(seek).toMatchObject({ type: "read", attempt: 2 })
+    if (!seek || seek.type !== "read") throw new Error("expected a tail read")
+    expect(seek.cursor).toBeGreaterThan(65_536)
+
+    const failed = transitionShellFollower(first.state, { type: "read.failed", attempt: seek.attempt })
+    if (failed.state.status !== "waiting") throw new Error("expected a retry")
+    const retry = transitionShellFollower(failed.state, { type: "wait.elapsed", attempt: failed.state.attempt })
+    const read = retry.effects.find((effect) => effect.type === "read")
+    expect(read).toMatchObject({ cursor: seek.cursor, limit: seek.limit })
+    if (!read || read.type !== "read") throw new Error("expected a tail retry")
+
+    const caughtUp = transitionShellFollower(retry.state, {
+      type: "read.succeeded",
+      attempt: read.attempt,
+      page: { output: text.slice(read.cursor), cursor: text.length, size: text.length * 2 },
+    })
+
+    expect(caughtUp.state).toMatchObject({ status: "waiting", output: text.slice(-SHELL_OUTPUT_TAIL_BYTES) })
+    expect(waits(caughtUp.effects)).toEqual([1_000])
+  })
+
   test("retries a failing read of an exited shell before giving up", () => {
     const delays: number[] = []
     let state = fresh(false)

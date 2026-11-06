@@ -17,6 +17,9 @@ export type ShellOutputPage = { readonly output: string; readonly cursor: number
 
 type Progress = { readonly attempt: number; readonly cursor: number; readonly output: string }
 
+// Keep one catch-up target across reads and retries so a growing log cannot postpone the next poll forever.
+type Pending = Progress & { readonly end?: number }
+
 /**
  * Reads one shell's output. `reading` has one request in flight; `final` means it started after the shell stopped
  * running, so reaching the end completes the output. `waiting` is the poll interval while the shell runs, or a backoff
@@ -24,13 +27,13 @@ type Progress = { readonly attempt: number; readonly cursor: number; readonly ou
  * a `missing` shell is gone from the server for good.
  */
 export type ShellFollowerState =
-  | (Progress & {
+  | (Pending & {
       readonly status: "reading"
       readonly running: boolean
       readonly final: boolean
       readonly failures: number
     })
-  | (Progress & {
+  | (Pending & {
       readonly status: "waiting"
       readonly running: boolean
       readonly failures: number
@@ -51,7 +54,7 @@ export type ShellFollowerEvent =
 
 /** `read` and `wait` replace the follower's single pending timer; `cancel` clears it. */
 export type ShellFollowerEffect =
-  | { readonly type: "read"; readonly attempt: number; readonly cursor: number }
+  | { readonly type: "read"; readonly attempt: number; readonly cursor: number; readonly limit?: number }
   | { readonly type: "wait"; readonly attempt: number; readonly delayMs: number }
   | { readonly type: "cancel" }
   | { readonly type: "cache"; readonly cursor: number; readonly output: string; readonly complete: boolean }
@@ -147,6 +150,30 @@ export function transitionShellFollower(state: ShellFollowerState, event: ShellF
   const output = (state.output + page.output).slice(-SHELL_OUTPUT_TAIL_BYTES)
   const emit = { type: "emit", output } as const
   const attempt = state.attempt + 1
+  const end = state.end ?? page.size
+
+  if (advanced && cursor < end) {
+    // Retention counts UTF-16 units: allow three UTF-8 bytes per unit, plus a split leading code point.
+    const seek = Math.max(cursor, end - (SHELL_OUTPUT_TAIL_BYTES * 3 + 3))
+
+    return {
+      state: {
+        status: "reading",
+        attempt,
+        cursor: seek,
+        output: seek > cursor ? "" : output,
+        running: state.running,
+        final: !state.running,
+        failures: 0,
+        end,
+      },
+      effects: [
+        { type: "cache", cursor, output, complete: false },
+        { type: "read", attempt, cursor: seek, limit: end - seek },
+        emit,
+      ],
+    }
+  }
 
   if (state.running)
     return {
@@ -203,7 +230,7 @@ function runningChanged(
   return read(state, false, 0)
 }
 
-function read(state: Progress, running: boolean, failures: number): ShellFollowerTransition {
+function read(state: Pending, running: boolean, failures: number): ShellFollowerTransition {
   const attempt = state.attempt + 1
 
   return {
@@ -215,17 +242,34 @@ function read(state: Progress, running: boolean, failures: number): ShellFollowe
       running,
       final: !running,
       failures,
+      end: state.end,
     },
-    effects: [{ type: "read", attempt, cursor: state.cursor }],
+    effects: [
+      {
+        type: "read",
+        attempt,
+        cursor: state.cursor,
+        limit: state.end === undefined ? undefined : state.end - state.cursor,
+      },
+    ],
   }
 }
 
-function backoff(state: Progress, running: boolean, failures: number): ShellFollowerTransition {
+function backoff(state: Pending, running: boolean, failures: number): ShellFollowerTransition {
   const attempt = state.attempt + 1
   const delayMs = Math.min(SHELL_MAX_BACKOFF_MS, SHELL_POLL_MS * 2 ** (failures - 1))
 
   return {
-    state: { status: "waiting", attempt, cursor: state.cursor, output: state.output, running, failures, delayMs },
+    state: {
+      status: "waiting",
+      attempt,
+      cursor: state.cursor,
+      output: state.output,
+      running,
+      failures,
+      delayMs,
+      end: state.end,
+    },
     effects: [{ type: "wait", attempt, delayMs }],
   }
 }
