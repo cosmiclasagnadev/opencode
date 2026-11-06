@@ -17,9 +17,6 @@ export type ShellOutputPage = { readonly output: string; readonly cursor: number
 
 type Progress = { readonly attempt: number; readonly cursor: number; readonly output: string }
 
-// Keep one catch-up target across reads and retries so a growing log cannot postpone the next poll forever.
-type Pending = Progress & { readonly end?: number }
-
 /**
  * Reads one shell's output. `reading` has one request in flight; `final` means it started after the shell stopped
  * running, so reaching the end completes the output. `waiting` is the poll interval while the shell runs, or a backoff
@@ -27,13 +24,13 @@ type Pending = Progress & { readonly end?: number }
  * a `missing` shell is gone from the server for good.
  */
 export type ShellFollowerState =
-  | (Pending & {
+  | (Progress & {
       readonly status: "reading"
       readonly running: boolean
       readonly final: boolean
       readonly failures: number
     })
-  | (Pending & {
+  | (Progress & {
       readonly status: "waiting"
       readonly running: boolean
       readonly failures: number
@@ -54,7 +51,7 @@ export type ShellFollowerEvent =
 
 /** `read` and `wait` replace the follower's single pending timer; `cancel` clears it. */
 export type ShellFollowerEffect =
-  | { readonly type: "read"; readonly attempt: number; readonly cursor: number; readonly limit?: number }
+  | { readonly type: "read"; readonly attempt: number; readonly cursor: number }
   | { readonly type: "wait"; readonly attempt: number; readonly delayMs: number }
   | { readonly type: "cancel" }
   | { readonly type: "cache"; readonly cursor: number; readonly output: string; readonly complete: boolean }
@@ -148,53 +145,42 @@ export function transitionShellFollower(state: ShellFollowerState, event: ShellF
   const advanced = page.cursor > state.cursor
   const cursor = Math.max(state.cursor, page.cursor)
   const output = (state.output + page.output).slice(-SHELL_OUTPUT_TAIL_BYTES)
-  const emit = { type: "emit", output } as const
+  // After a seek, an empty read must not clear the output already on screen.
+  const emit: ShellFollowerEffect[] = output || cursor === 0 ? [{ type: "emit", output }] : []
   const attempt = state.attempt + 1
-  const end = state.end ?? page.size
 
-  if (advanced && cursor < end) {
-    // Retention counts UTF-16 units: allow three UTF-8 bytes per unit, plus a split leading code point.
-    const seek = Math.max(cursor, end - (SHELL_OUTPUT_TAIL_BYTES * 3 + 3))
+  if (state.running) {
+    // Only the retained tail is shown, so the next poll skips pages it would discard.
+    const next = Math.max(cursor, page.size - SHELL_OUTPUT_TAIL_BYTES)
 
     return {
       state: {
-        status: "reading",
+        status: "waiting",
         attempt,
-        cursor: seek,
-        output: seek > cursor ? "" : output,
-        running: state.running,
-        final: !state.running,
+        cursor: next,
+        output: next > cursor ? "" : output,
+        running: true,
         failures: 0,
-        end,
+        delayMs: SHELL_POLL_MS,
       },
       effects: [
         { type: "cache", cursor, output, complete: false },
-        { type: "read", attempt, cursor: seek, limit: end - seek },
-        emit,
+        { type: "wait", attempt, delayMs: SHELL_POLL_MS },
+        ...emit,
       ],
     }
   }
-
-  if (state.running)
-    return {
-      state: { status: "waiting", attempt, cursor, output, running: true, failures: 0, delayMs: SHELL_POLL_MS },
-      effects: [
-        { type: "cache", cursor, output, complete: false },
-        { type: "wait", attempt, delayMs: SHELL_POLL_MS },
-        emit,
-      ],
-    }
 
   // A read that started while the shell ran may have missed its last output, so the shell is read once more.
   if (!state.final || (cursor < page.size && advanced))
     return {
       state: { status: "reading", attempt, cursor, output, running: false, final: true, failures: 0 },
-      effects: [{ type: "cache", cursor, output, complete: false }, { type: "read", attempt, cursor }, emit],
+      effects: [{ type: "cache", cursor, output, complete: false }, { type: "read", attempt, cursor }, ...emit],
     }
 
   return {
     state: { status: "complete", attempt: state.attempt, cursor, output },
-    effects: [CANCEL, { type: "cache", cursor, output, complete: cursor >= page.size }, emit],
+    effects: [CANCEL, { type: "cache", cursor, output, complete: cursor >= page.size }, ...emit],
   }
 }
 
@@ -230,7 +216,7 @@ function runningChanged(
   return read(state, false, 0)
 }
 
-function read(state: Pending, running: boolean, failures: number): ShellFollowerTransition {
+function read(state: Progress, running: boolean, failures: number): ShellFollowerTransition {
   const attempt = state.attempt + 1
 
   return {
@@ -242,34 +228,17 @@ function read(state: Pending, running: boolean, failures: number): ShellFollower
       running,
       final: !running,
       failures,
-      end: state.end,
     },
-    effects: [
-      {
-        type: "read",
-        attempt,
-        cursor: state.cursor,
-        limit: state.end === undefined ? undefined : state.end - state.cursor,
-      },
-    ],
+    effects: [{ type: "read", attempt, cursor: state.cursor }],
   }
 }
 
-function backoff(state: Pending, running: boolean, failures: number): ShellFollowerTransition {
+function backoff(state: Progress, running: boolean, failures: number): ShellFollowerTransition {
   const attempt = state.attempt + 1
   const delayMs = Math.min(SHELL_MAX_BACKOFF_MS, SHELL_POLL_MS * 2 ** (failures - 1))
 
   return {
-    state: {
-      status: "waiting",
-      attempt,
-      cursor: state.cursor,
-      output: state.output,
-      running,
-      failures,
-      delayMs,
-      end: state.end,
-    },
+    state: { status: "waiting", attempt, cursor: state.cursor, output: state.output, running, failures, delayMs },
     effects: [{ type: "wait", attempt, delayMs }],
   }
 }

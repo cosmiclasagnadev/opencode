@@ -62,12 +62,10 @@ export function createShellFollower(input: {
 
     const attempt = effect.attempt
     timer = setTimeout(() => dispatch({ type: "read.failed", attempt }), SHELL_READ_TIMEOUT_MS)
-    void input
-      .load({ id: input.id, location: { directory: input.directory }, cursor: effect.cursor, limit: effect.limit })
-      .then(
-        (response) => dispatch({ type: "read.succeeded", attempt, page: response.data }),
-        (cause: unknown) => dispatch({ type: isShellNotFoundError(cause) ? "read.missing" : "read.failed", attempt }),
-      )
+    void input.load({ id: input.id, location: { directory: input.directory }, cursor: effect.cursor }).then(
+      (response) => dispatch({ type: "read.succeeded", attempt, page: response.data }),
+      (cause: unknown) => dispatch({ type: isShellNotFoundError(cause) ? "read.missing" : "read.failed", attempt }),
+    )
   }
 
   initial.effects.forEach(run)
