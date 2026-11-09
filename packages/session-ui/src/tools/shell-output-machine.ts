@@ -154,15 +154,8 @@ export function transitionShellFollower(state: ShellFollowerState, event: ShellF
     const next = Math.max(cursor, page.size - SHELL_OUTPUT_TAIL_BYTES)
 
     return {
-      state: {
-        status: "waiting",
-        attempt,
-        cursor: next,
-        output: next > cursor ? "" : output,
-        running: true,
-        failures: 0,
-        delayMs: SHELL_POLL_MS,
-      },
+      // prettier-ignore
+      state: { status: "waiting", attempt, cursor: next, output: next > cursor ? "" : output, running: true, failures: 0, delayMs: SHELL_POLL_MS },
       effects: [
         { type: "cache", cursor, output, complete: false },
         { type: "wait", attempt, delayMs: SHELL_POLL_MS },
