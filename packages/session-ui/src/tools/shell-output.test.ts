@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from "bun:test"
+import { randomUUID } from "node:crypto"
 import type { ShellOutputInput, ShellOutputOutput } from "@opencode/client/promise"
 import { createShellFollower, followShellOutput } from "./shell-output"
 import { SHELL_OUTPUT_TAIL_BYTES, SHELL_READ_TIMEOUT_MS } from "./shell-output-machine"
@@ -35,6 +36,67 @@ async function flush() {
 const notFound = (id: string) => ({ _tag: "ShellNotFoundError", id, message: "Shell command not found" })
 
 describe("followShellOutput", () => {
+  test("reads the recent live tail on the next poll", async () => {
+    vi.useFakeTimers()
+    const text = "old\n".repeat(SHELL_OUTPUT_TAIL_BYTES * 4) + "LATEST-MARKER\n"
+    const shell = server(() => text, SHELL_OUTPUT_TAIL_BYTES)
+    const outputs: string[] = []
+    const stop = followShellOutput({
+      id: randomUUID(),
+      directory: "/repo",
+      running: true,
+      load: shell.load,
+      onOutput: (output) => outputs.push(output),
+    })
+
+    try {
+      await flush()
+      expect(shell.cursors).toEqual([0])
+      vi.advanceTimersByTime(1_000)
+      await flush()
+      expect(shell.cursors).toEqual([0, text.length - SHELL_OUTPUT_TAIL_BYTES])
+      expect(outputs.at(-1)).toBe(text.slice(-SHELL_OUTPUT_TAIL_BYTES))
+    } finally {
+      stop()
+      vi.useRealTimers()
+    }
+  })
+
+  test("keeps the displayed output when a tail read is empty", async () => {
+    vi.useFakeTimers()
+    const text = "old\n".repeat(SHELL_OUTPUT_TAIL_BYTES) + "LATEST-MARKER\n"
+    const shell = server(() => text, SHELL_OUTPUT_TAIL_BYTES)
+    const outputs: string[] = []
+    let reads = 0
+    const stop = followShellOutput({
+      id: randomUUID(),
+      directory: "/repo",
+      running: true,
+      load: (input) =>
+        ++reads === 2
+          ? Promise.resolve({
+              location,
+              data: { output: "", cursor: input.cursor ?? 0, size: text.length, truncated: false },
+            })
+          : shell.load(input),
+      onOutput: (output) => outputs.push(output),
+    })
+
+    try {
+      await flush()
+      const shown = outputs.at(-1)
+      vi.advanceTimersByTime(1_000)
+      await flush()
+      expect(outputs.at(-1)).toBe(shown)
+      vi.advanceTimersByTime(1_000)
+      await flush()
+      expect(outputs.at(-1)).toBe(text.slice(-SHELL_OUTPUT_TAIL_BYTES))
+    } finally {
+      stop()
+      vi.useRealTimers()
+    }
+  })
+
   test("stops polling a missing shell and never requests it again", async () => {
     vi.useFakeTimers()
 

@@ -145,29 +145,42 @@ export function transitionShellFollower(state: ShellFollowerState, event: ShellF
   const advanced = page.cursor > state.cursor
   const cursor = Math.max(state.cursor, page.cursor)
   const output = (state.output + page.output).slice(-SHELL_OUTPUT_TAIL_BYTES)
-  const emit = { type: "emit", output } as const
+  // After a seek, an empty read must not clear the output already on screen.
+  const emit: ShellFollowerEffect[] = output || cursor === 0 ? [{ type: "emit", output }] : []
   const attempt = state.attempt + 1
 
-  if (state.running)
+  if (state.running) {
+    // Only the retained tail is shown, so the next poll skips pages it would discard.
+    const next = Math.max(cursor, page.size - SHELL_OUTPUT_TAIL_BYTES)
+
     return {
-      state: { status: "waiting", attempt, cursor, output, running: true, failures: 0, delayMs: SHELL_POLL_MS },
+      state: {
+        status: "waiting",
+        attempt,
+        cursor: next,
+        output: next > cursor ? "" : output,
+        running: true,
+        failures: 0,
+        delayMs: SHELL_POLL_MS,
+      },
       effects: [
         { type: "cache", cursor, output, complete: false },
         { type: "wait", attempt, delayMs: SHELL_POLL_MS },
-        emit,
+        ...emit,
       ],
     }
+  }
 
   // A read that started while the shell ran may have missed its last output, so the shell is read once more.
   if (!state.final || (cursor < page.size && advanced))
     return {
       state: { status: "reading", attempt, cursor, output, running: false, final: true, failures: 0 },
-      effects: [{ type: "cache", cursor, output, complete: false }, { type: "read", attempt, cursor }, emit],
+      effects: [{ type: "cache", cursor, output, complete: false }, { type: "read", attempt, cursor }, ...emit],
     }
 
   return {
     state: { status: "complete", attempt: state.attempt, cursor, output },
-    effects: [CANCEL, { type: "cache", cursor, output, complete: cursor >= page.size }, emit],
+    effects: [CANCEL, { type: "cache", cursor, output, complete: cursor >= page.size }, ...emit],
   }
 }
 

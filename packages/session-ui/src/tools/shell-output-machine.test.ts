@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import {
   createShellFollowerState,
   SHELL_EXITED_MAX_RETRIES,
+  SHELL_OUTPUT_TAIL_BYTES,
   transitionShellFollower,
   type ShellFollowerEffect,
   type ShellFollowerEvent,
@@ -32,6 +33,52 @@ function fail(state: ShellFollowerState) {
 }
 
 describe("transitionShellFollower", () => {
+  test("skips old live pages while keeping the normal polling rate", () => {
+    const size = SHELL_OUTPUT_TAIL_BYTES * 16
+    const seeking = transitionShellFollower(fresh(true), {
+      type: "read.succeeded",
+      attempt: 1,
+      page: { output: "x".repeat(SHELL_OUTPUT_TAIL_BYTES), cursor: SHELL_OUTPUT_TAIL_BYTES, size },
+    })
+
+    expect(seeking.state).toMatchObject({ status: "waiting", cursor: size - SHELL_OUTPUT_TAIL_BYTES, output: "" })
+    expect(waits(seeking.effects)).toEqual([1_000])
+    expect(seeking.effects.some((effect) => effect.type === "read")).toBe(false)
+
+    const reading = transitionShellFollower(seeking.state, { type: "wait.elapsed", attempt: 2 })
+    const growing = transitionShellFollower(reading.state, {
+      type: "read.succeeded",
+      attempt: 3,
+      page: { output: "y".repeat(SHELL_OUTPUT_TAIL_BYTES), cursor: size, size: size * 2 },
+    })
+
+    expect(growing.state).toMatchObject({ status: "waiting", cursor: size * 2 - SHELL_OUTPUT_TAIL_BYTES })
+    expect(waits(growing.effects)).toEqual([1_000])
+  })
+
+  test("reads the tail when a shell stops between the seek and the next poll", () => {
+    const size = SHELL_OUTPUT_TAIL_BYTES * 4
+    const seeking = replay(
+      [
+        {
+          type: "read.succeeded",
+          attempt: 1,
+          page: { output: "x".repeat(SHELL_OUTPUT_TAIL_BYTES), cursor: SHELL_OUTPUT_TAIL_BYTES, size },
+        },
+      ],
+      fresh(true),
+    )
+    const stopped = transitionShellFollower(seeking, { type: "running.changed", running: false })
+    expect(stopped.effects).toEqual([{ type: "read", attempt: 3, cursor: size - SHELL_OUTPUT_TAIL_BYTES }])
+    const tail = "y".repeat(SHELL_OUTPUT_TAIL_BYTES)
+    const done = transitionShellFollower(stopped.state, {
+      type: "read.succeeded",
+      attempt: 3,
+      page: { output: tail, cursor: size, size },
+    })
+    expect(done.state).toMatchObject({ status: "complete", output: tail })
+  })
+
   test("retries a failing read of an exited shell before giving up", () => {
     const delays: number[] = []
     let state = fresh(false)
